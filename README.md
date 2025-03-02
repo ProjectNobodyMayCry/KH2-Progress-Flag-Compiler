@@ -3,7 +3,7 @@ This python script is designed to take a 'Progress Flag Script' text file and co
 
 You can drag and drop your text file onto the python script directly, or you can call it via Command Line. Here's an example.
 
->>py progress-compiler.py "your_text_file.txt"
+> >py progress-compiler.py "your_text_file.txt"
 
 I would recommend using the Progress Flag Scripts in the '00progress' folder as a base. Those are Progress Flag Scripts for each world in KH2. If used with the compiler, they will create the exact same hex file as they are found in a vanilla 00progress.bin file.
 
