@@ -16,10 +16,12 @@ The "world.bin" files have a structure with a Header, then the Progress Flag ins
 The Header contains offsets to the start of each Progress Flag in the hex file. They are a ushort in length and are in little-Endian. So for example, if the offset for a progress flag is "FE 01", the start of that Progress Flag will be 0x1FE bytes into the hex file. There is no traditional "count" of Progress Flags, the Header simply has a certain amount of offsets, and that determines how many Progress Flags there are in the file.
 
 The Progress Flag can contain any number of instructions and will stop when it reads a "00 00". The structure for the instructions is the following.
+```
 Offset	Size	Description
 0x0		byte	Code Type
 0x1		byte	Data Count
 0x2		ushort	Data
+```
 
 This is the Enum for Code Types
 
