@@ -18,9 +18,9 @@ The Header contains offsets to the start of each Progress Flag in the hex file. 
 The Progress Flag can contain any number of instructions and will stop when it reads a "00 00". The structure for the instructions is the following.
 ```
 Offset	Size	Description
-0x0		byte	Code Type
-0x1		byte	Data Count
-0x2		ushort	Data
+0x0	byte	Code Type
+0x1	byte	Data Count
+0x2	ushort	Data
 ```
 
 This is the Enum for Code Types
