@@ -65,11 +65,121 @@ INSTRUCTION_MARKERS = [
     "Raise Menu:"
 ]
 
+def check_line_syntax(line, line_number):
+    """
+    Check the syntax of a line for valid instructions and formatting.
+    Args:
+        line: The line to check
+        line_number: The line number for error reporting
+    Raises:
+        ValueError: If the line contains invalid syntax
+    """
+    if ':' in line:
+        # Check if it's a Progress Flag Header (4 hex digits, optional text, followed by ':')
+        is_progress_header = (len(line) >= 4 and 
+                            all(c in '0123456789ABCDEFabcdef' for c in line[0:4]) and 
+                            ':' in line[4:])
+        
+        # Split at the colon and check if the instruction part (with colon added back) is valid
+        instruction_part = line.split(':')[0].strip() + ':'
+        
+        # Special cases for sub-instructions
+        is_special_case = (
+            instruction_part == "Text:" or  # Text values for Block commands
+            instruction_part == "Room:" or  # Room values for Spawn ID Change
+            (line.startswith("Room ") and len(line) >= 7 and line[5:7].isalnum())  # Room XX: format for Spawn ID Change
+        )
+        
+        if not is_progress_header and not is_special_case and instruction_part not in INSTRUCTION_MARKERS:
+            raise ValueError(f"Line {line_number}: Invalid instruction '{line}'.")
+    else:
+        # Check for common formatting errors in sub-instructions
+        stripped_line = line.strip()
+        if stripped_line.startswith('Text '):
+            raise ValueError(f"Line {line_number}: Invalid Text instruction format. Must be 'Text: XXXX YYYY'")
+        elif stripped_line.startswith('Room '):
+            raise ValueError(f"Line {line_number}: Invalid Room instruction format. Must be 'Room XX: values'")
+
 class Instruction:
     def __init__(self, type, count, data):
         self.type = type
         self.count = count
         self.data = data
+
+def parse_menu_flags(lines, i, code_type):
+    """Helper function to parse menu flags for both raise and lower operations"""
+    menu_values = []
+    next_pos = i + 1
+    while next_pos < len(lines):
+        next_line = lines[next_pos].split(';')[0].strip()
+        if not next_line or next_line in INSTRUCTION_MARKERS:
+            break
+        
+        parts = next_line.split()
+        if parts:
+            try:
+                value = int(parts[0], 16)
+                menu_values.append(value)
+            except ValueError:
+                print(f"Warning: Skipping invalid menu value: {parts[0]}")
+        next_pos += 1
+    
+    return menu_values, next_pos
+
+def parse_dsa_command(line, dsa_table, code_type, data_size=1):
+    """Helper function to parse DSA-related commands"""
+    parts = line.strip().split()
+    if len(parts) >= 4 and parts[0] == "World" and parts[2] == "Room":
+        try:
+            # Validate World ID
+            if not all(c in '0123456789ABCDEFabcdef' for c in parts[1]):
+                raise ValueError(f"World ID '{parts[1]}' must be in hexadecimal")
+            world_id = int(parts[1], 16)
+            if world_id < 0 or world_id > 255:
+                raise ValueError(f"World ID '{parts[1]}' must be an unsigned byte (0x00 to 0xFF)")
+            
+            # Validate Room ID
+            if not all(c in '0123456789ABCDEFabcdef' for c in parts[3]):
+                raise ValueError(f"Room ID '{parts[3]}' must be in hexadecimal")
+            room_id = int(parts[3], 16)
+            if room_id < 0 or room_id > 255:
+                raise ValueError(f"Room ID '{parts[3]}' must be an unsigned byte (0x00 to 0xFF)")
+            
+            if dsa_table and (world_id, room_id) in dsa_table:
+                index = dsa_table[(world_id, room_id)]
+                result = bytearray([code_type, data_size, index & 0xFF, (index >> 8) & 0xFF])
+                return result, 4  # Return data and size
+            else:
+                raise ValueError(f"World {world_id:02X} Room {room_id:02X} not found in DSA table")
+                
+        except ValueError as e:
+            if any(msg in str(e) for msg in ["must be in hexadecimal", "must be an unsigned byte", "not found in DSA table"]):
+                raise
+            raise ValueError(f"Could not parse DSA command values: {line}")
+    return None, 0
+
+def parse_progress_flags(lines, i, code_type):
+    """Helper function to parse progress flags for both raise and lower operations"""
+    progress_count = 0
+    next_pos = i + 1
+    while next_pos < len(lines):
+        next_line = lines[next_pos].split(';')[0].strip()
+        if not next_line or next_line in INSTRUCTION_MARKERS:
+            break
+        progress_count += 1
+        next_pos += 1
+    
+    result = bytearray([code_type, progress_count])
+    offset = 2  # code + count
+    
+    for _ in range(progress_count):
+        i += 1
+        progress_line = lines[i].split(';')[0].strip()
+        value = int(progress_line[0:4], 16)
+        result.extend([value & 0xFF, (value >> 8) & 0xFF])
+        offset += 2
+    
+    return result, offset, next_pos
 
 def parse_instructions(text):
     dsa_table = load_dsa_table()
@@ -79,16 +189,20 @@ def parse_instructions(text):
     progress_flags = []
     current_flag = None
     
-    for i, line in enumerate(lines):
+    # Add line number tracking
+    for i, line in enumerate(lines, 1):
         line = line.split(';')[0].strip()
         if not line:
             continue
-            
-        # Check for progress flag header (4 hex digits followed by colon)
+
+        # Check line syntax
+        check_line_syntax(line, i)
+        
+        # Check for progress flag header (existing code)
         if len(line) >= 4 and all(c in '0123456789ABCDEFabcdef' for c in line[0:4]) and ':' in line:
             current_flag = int(line[0:4], 16)
             progress_flags.append(current_flag)
-    
+
     # Calculate header size (2 bytes per progress flag)
     header_size = len(progress_flags) * 2
     
@@ -148,55 +262,17 @@ def parse_instructions(text):
             continue
 
         if line == "Raise Progress:":
-            progress_count = 0
-            next_pos = i + 1
-            while next_pos < len(lines):
-                next_line = lines[next_pos].split(';')[0].strip()
-                if not next_line or next_line in INSTRUCTION_MARKERS:
-                    break
-                progress_count += 1
-                next_pos += 1
-            
-            data.append(CODE_SET_PROGRESS)
-            data.append(progress_count)
-            current_offset += 2  # code + count
-            
-            for _ in range(progress_count):
-                i += 1
-                progress_line = lines[i].split(';')[0].strip()
-                hex_val = progress_line[0:4]
-                value = int(hex_val, 16)
-                data.append(value & 0xFF)
-                data.append((value >> 8) & 0xFF)
-                current_offset += 2
-            
-            i += 1
+            result, offset, next_pos = parse_progress_flags(lines, i, CODE_SET_PROGRESS)
+            data.extend(result)
+            current_offset += offset
+            i = next_pos
             continue
 
         if line == "Lower Progress:":
-            progress_count = 0
-            next_pos = i + 1
-            while next_pos < len(lines):
-                next_line = lines[next_pos].split(';')[0].strip()
-                if not next_line or next_line in INSTRUCTION_MARKERS:
-                    break
-                progress_count += 1
-                next_pos += 1
-            
-            data.append(CODE_RESET_PROGRESS)
-            data.append(progress_count)
-            current_offset += 2  # code + count
-            
-            for _ in range(progress_count):
-                i += 1
-                progress_line = lines[i].split(';')[0].strip()
-                hex_val = progress_line[0:4]
-                value = int(hex_val, 16)
-                data.append(value & 0xFF)
-                data.append((value >> 8) & 0xFF)
-                current_offset += 2
-            
-            i += 1
+            result, offset, next_pos = parse_progress_flags(lines, i, CODE_RESET_PROGRESS)
+            data.extend(result)
+            current_offset += offset
+            i = next_pos
             continue
 
         if line == "Spawn ID Change:":
@@ -231,9 +307,17 @@ def parse_instructions(text):
                     if num == "-1":
                         data.extend([0xFF, 0xFF])
                     else:
-                        value = int(num, 16)
-                        data.append(value & 0xFF)
-                        data.append((value >> 8) & 0xFF)
+                        try:
+                            # Parse as hex if it's a hex string, otherwise as decimal
+                            value = int(num, 16) if all(c in '0123456789ABCDEFabcdef' for c in num) else int(num)
+                            if value < 0 or value > 255:
+                                raise ValueError(f"Line {next_pos + 1}: Spawn ID value '{num}' must be an unsigned byte (0 to 255)")
+                            data.append(value & 0xFF)
+                            data.append(0)  # High byte is always 0 for spawn IDs
+                        except ValueError as e:
+                            if "must be an unsigned byte" in str(e):
+                                raise
+                            raise ValueError(f"Line {next_pos + 1}: Invalid spawn ID value: '{num}'")
                     current_offset += 2
                 
                 next_pos += 1
@@ -242,99 +326,64 @@ def parse_instructions(text):
             continue
 
         if line.startswith("Block:"):
-            parts = line[6:].strip().split()
-            if len(parts) >= 4 and parts[0] == "World" and parts[2] == "Room":
-                try:
-                    world_id = int(parts[1], 16)
-                    room_id = int(parts[3], 16)
+            result, size = parse_dsa_command(line[6:], dsa_table, CODE_DSA_DISABLE, 3)
+            if result:
+                data.extend(result)
+                # Handle text values if present
+                text_line = lines[i + 1].split(';')[0].strip() if i + 1 < len(lines) else ""
+                if text_line.startswith("Text:"):
+                    text_parts = text_line[5:].strip().split()
+                    # Validate we have exactly two text values
+                    if len(text_parts) != 2:
+                        raise ValueError(f"Line {i + 2}: Text instruction requires exactly 2 text strings, found {len(text_parts)}")
                     
-                    if dsa_table and (world_id, room_id) in dsa_table:
-                        index = dsa_table[(world_id, room_id)]
+                    try:
+                        # Try to parse each value as a hex number
                         text_values = []
+                        for text_id in text_parts:
+                            if not all(c in '0123456789ABCDEFabcdef' for c in text_id):
+                                raise ValueError(f"Line {i + 2}: Text string '{text_id}' must be in hexidecimal.")
+                            value = int(text_id, 16) + 0x8000
+                            if value > 0xFFFF:
+                                raise ValueError(f"Line {i + 2}: Text string '{text_id}' must fit an unsigned short (0x0000 to 0x7FFF)")
+                            text_values.append(value)
                         
-                        text_line = lines[i + 1].split(';')[0].strip() if i + 1 < len(lines) else ""
-                        if text_line.startswith("Text:"):
-                            text_parts = text_line[5:].strip().split()
-                            if len(text_parts) >= 2:
-                                text_values = [int(text_id, 16) + 0x8000 for text_id in text_parts[:2]]
-                                i += 1
-                        
-                        data.append(CODE_DSA_DISABLE)
-                        data.append(3)
-                        data.append(index & 0xFF)
-                        data.append((index >> 8) & 0xFF)
-                        current_offset += 4  # code + count + index
-                        
-                        if text_values:
-                            for value in text_values:
-                                data.append(value & 0xFF)
-                                data.append((value >> 8) & 0xFF)
-                                current_offset += 2
-                        else:
-                            data.extend([0, 0, 0, 0])
-                            current_offset += 4
-                except ValueError:
-                    print(f"Warning: Could not parse Block line: {line}")
+                        # Add the validated values
+                        for value in text_values:
+                            data.append(value & 0xFF)
+                            data.append((value >> 8) & 0xFF)
+                        size += 4
+                        i += 1
+                    except ValueError as e:
+                        if "must be in hexidecimal" in str(e) or "must fit an unsigned short" in str(e):
+                            raise
+                        raise ValueError(f"Line {i + 2}: Invalid text value format")
+                    
+                current_offset += size
             i += 1
             continue
 
         if line.startswith("Unblock:"):
-            parts = line[8:].strip().split()
-            if len(parts) >= 4 and parts[0] == "World" and parts[2] == "Room":
-                try:
-                    world_id = int(parts[1], 16)
-                    room_id = int(parts[3], 16)
-                    
-                    if dsa_table and (world_id, room_id) in dsa_table:
-                        index = dsa_table[(world_id, room_id)]
-                        
-                        data.append(CODE_DSA_ENABLE)
-                        data.append(1)
-                        data.append(index & 0xFF)
-                        data.append((index >> 8) & 0xFF)
-                        current_offset += 4  # code + count + index
-                except ValueError:
-                    print(f"Warning: Could not parse Unblock line: {line}")
+            result, size = parse_dsa_command(line[8:], dsa_table, CODE_DSA_ENABLE)
+            if result:
+                data.extend(result)
+                current_offset += size
             i += 1
             continue
 
         if line.startswith("Remove Warp:"):
-            parts = line[12:].strip().split()
-            if len(parts) >= 4 and parts[0] == "World" and parts[2] == "Room":
-                try:
-                    world_id = int(parts[1], 16)
-                    room_id = int(parts[3], 16)
-                    
-                    if dsa_table and (world_id, room_id) in dsa_table:
-                        index = dsa_table[(world_id, room_id)]
-                        
-                        data.append(CODE_DSA_RESET)
-                        data.append(1)
-                        data.append(index & 0xFF)
-                        data.append((index >> 8) & 0xFF)
-                        current_offset += 4  # code + count + index
-                except ValueError:
-                    print(f"Warning: Could not parse Remove Warp line: {line}")
+            result, size = parse_dsa_command(line[12:], dsa_table, CODE_DSA_RESET)
+            if result:
+                data.extend(result)
+                current_offset += size
             i += 1
             continue
 
         if line.startswith("Add Warp:"):
-            parts = line[10:].strip().split()
-            if len(parts) >= 4 and parts[0] == "World" and parts[2] == "Room":
-                try:
-                    world_id = int(parts[1], 16)
-                    room_id = int(parts[3], 16)
-                    
-                    if dsa_table and (world_id, room_id) in dsa_table:
-                        index = dsa_table[(world_id, room_id)]
-                        
-                        data.append(CODE_DSA_LOST)
-                        data.append(1)
-                        data.append(index & 0xFF)
-                        data.append((index >> 8) & 0xFF)
-                        current_offset += 4  # code + count + index
-                except ValueError:
-                    print(f"Warning: Could not parse Add Warp line: {line}")
+            result, size = parse_dsa_command(line[10:], dsa_table, CODE_DSA_LOST)
+            if result:
+                data.extend(result)
+                current_offset += size
             i += 1
             continue
 
@@ -354,26 +403,10 @@ def parse_instructions(text):
             continue
 
         if line.startswith("Raise Menu:"):
-            menu_values = []
-            next_pos = i + 1
-            while next_pos < len(lines):
-                next_line = lines[next_pos].split(';')[0].strip()
-                if not next_line or next_line in INSTRUCTION_MARKERS:
-                    break
-                
-                parts = next_line.split()
-                if parts:
-                    try:
-                        first_value = parts[0]
-                        value = int(first_value, 16)
-                        menu_values.append(value)
-                    except ValueError:
-                        print(f"Warning: Skipping invalid menu value: {parts[0]}")
-                next_pos += 1
-            
+            menu_values, next_pos = parse_menu_flags(lines, i, CODE_MENUFLAG)
             data.append(CODE_MENUFLAG)
             data.append(len(menu_values))
-            current_offset += 2  # code + count
+            current_offset += 2
             
             for value in menu_values:
                 data.append(value)
@@ -384,26 +417,10 @@ def parse_instructions(text):
             continue
 
         if line.startswith("Lower Menu:"):
-            menu_values = []
-            next_pos = i + 1
-            while next_pos < len(lines):
-                next_line = lines[next_pos].split(';')[0].strip()
-                if not next_line or next_line in INSTRUCTION_MARKERS:
-                    break
-                
-                parts = next_line.split()
-                if parts:
-                    try:
-                        first_value = parts[0]
-                        value = int(first_value, 16)
-                        menu_values.append(value)
-                    except ValueError:
-                        print(f"Warning: Skipping invalid menu value: {parts[0]}")
-                next_pos += 1
-            
+            menu_values, next_pos = parse_menu_flags(lines, i, CODE_RESET_MENUFLAG)
             data.append(CODE_RESET_MENUFLAG)
             data.append(len(menu_values))
-            current_offset += 2  # code + count
+            current_offset += 2
             
             for value in menu_values:
                 data.append(value)
